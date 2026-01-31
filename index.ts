@@ -6,7 +6,6 @@ import { z } from 'zod';
 import { join, dirname } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { $ } from 'bun';
-import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 
 import { getPackageVersion } from './macros.ts' with { type: 'macro' };
@@ -152,7 +151,7 @@ async function initializeDocsDir(): Promise<string> {
   const bunVersion = Bun.version;
   const versionCandidates = listVersionCandidates(bunVersion);
   const cacheDocsDir = join(
-    homedir(),
+    Bun.env.HOME || '/tmp',
     '.cache',
     'bun-doc-mcp',
     bunVersion,
