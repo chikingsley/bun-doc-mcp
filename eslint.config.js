@@ -14,5 +14,9 @@ export default tseslint.config(
         Bun: "readonly",
       },
     },
+    rules: {
+      // ESLint v9.35.0 - preserve error context when re-throwing
+      "no-useless-catch": "error",
+    },
   }
 );
