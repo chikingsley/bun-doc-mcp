@@ -153,7 +153,7 @@ async function initializeDocsDir(): Promise<string> {
   const cacheDocsDir = join(
     Bun.env.HOME || '/tmp',
     '.cache',
-    'bun-doc-mcp',
+    'bun-mcp-server',
     bunVersion,
     'docs'
   );
@@ -790,7 +790,7 @@ async function readDocument(input: string): Promise<string> {
 
 const server = new McpServer(
   {
-    name: 'bun-doc-mcp',
+    name: 'bun-mcp-server',
     version: VERSION,
   },
   {

@@ -13,7 +13,7 @@ describe('MCP Server Integration Tests', () => {
   let db: Database;
   let resourceIndex: Map<string, IndexedResource>;
   const bunVersion = Bun.version;
-  const docsDir = `${process.env.HOME}/.cache/bun-doc-mcp/${bunVersion}/docs`;
+  const docsDir = `${process.env.HOME}/.cache/bun-mcp-server/${bunVersion}/docs`;
 
   beforeAll(async () => {
     // Skip if docs not cached
@@ -23,7 +23,7 @@ describe('MCP Server Integration Tests', () => {
     }
 
     // Initialize real database
-    const dbPath = `${process.env.HOME}/.cache/bun-doc-mcp/${bunVersion}/search.db`;
+    const dbPath = `${process.env.HOME}/.cache/bun-mcp-server/${bunVersion}/search.db`;
     db = new Database(dbPath);
 
     // Build minimal resource index for testing

@@ -1,12 +1,12 @@
 {
-  "name": "bun-doc-mcp",
+  "name": "bun-mcp-server",
   "version": "3.1.0",
   "description": "MCP server for Bun documentation",
   "module": "index.ts",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
-    "bun-doc-mcp": "dist/index.js"
+    "bun-mcp-server": "dist/index.js"
   },
   "files": [
     "dist/**/*"
@@ -17,11 +17,11 @@
     "documentation",
     "model-context-protocol"
   ],
-  "author": "Zhou Rui",
+  "author": "chikingsley",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ghoulr/bun-doc-mcp.git"
+    "url": "git+https://github.com/chikingsley/bun-mcp-server.git"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",

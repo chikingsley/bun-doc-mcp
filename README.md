@@ -9,7 +9,7 @@ A Model Context Protocol (MCP) server that provides intelligent access to [Bun](
 - **📖 Document reading**: Access complete markdown documentation by slug
 - **📑 Document listing**: Browse available docs by category
 - **🔄 Version-matched**: Automatically downloads docs matching your Bun version from GitHub
-- **⚡ Fast local caching**: Docs cached in `~/.cache/bun-doc-mcp/` with SQLite search index
+- **⚡ Fast local caching**: Docs cached in `~/.cache/bun-mcp-server/` with SQLite search index
 - **🤖 AI-optimized**: Structured for AI assistants with relevance scoring and context snippets
 
 ## 🛠️ Available Tools
@@ -47,13 +47,13 @@ Browse available documentation
 ### Via Claude Code (recommended)
 
 ```bash
-claude mcp add bun-docs bunx bun-doc-mcp
+claude mcp add bun-docs bunx bun-mcp-server
 ```
 
 ### Via npx/bunx
 
 ```bash
-bunx bun-doc-mcp
+bunx bun-mcp-server
 ```
 
 ### Manual MCP Configuration
@@ -64,7 +64,7 @@ bunx bun-doc-mcp
     "bun-docs": {
       "type": "stdio",
       "command": "bunx",
-      "args": ["bun-doc-mcp"],
+      "args": ["bun-mcp-server"],
       "env": {}
     }
   }

@@ -31,7 +31,7 @@ export async function createMcpServer(
 
   const server = new McpServer(
     {
-      name: 'bun-doc-mcp',
+      name: 'bun-mcp-server',
       version: VERSION,
     },
     {
