@@ -1,32 +1,62 @@
 # <img src="https://bun.com/logo.svg" height="20"> Bun Documentation MCP
 
-A MCP server that provides [Bun](https://bun.com) documentation to AI assistants. This enables your AI to access up-to-date Bun documentation and provide accurate guidance on Bun APIs.
+A Model Context Protocol (MCP) server that provides intelligent access to [Bun](https://bun.com) documentation. Enables AI assistants to search, read, and query Bun docs with full-text search capabilities.
 
 ## ✨ Features
 
-- **Version-matched documentation**: uses your local `node_modules/bun-types/docs/`, or syncs from GitHub based on your Bun version
-- **Search functionality**: includes a grep tool with JavaScript regex support for searching documentation
-- **Built with Bun**: for Bun
-- **AI-friendly**: structured to provide relevant context to AI assistants
+- **📚 Full-text search**: SQLite FTS5 with BM25 ranking for fast, relevant search results
+- **🔍 Regex search**: JavaScript regex support for precise pattern matching
+- **📖 Document reading**: Access complete markdown documentation by slug
+- **📑 Document listing**: Browse available docs by category
+- **🔄 Version-matched**: Automatically downloads docs matching your Bun version from GitHub
+- **⚡ Fast local caching**: Docs cached in `~/.cache/bun-doc-mcp/` with SQLite search index
+- **🤖 AI-optimized**: Structured for AI assistants with relevance scoring and context snippets
 
-## 🚀 Quick Start
+## 🛠️ Available Tools
 
-If you're already in a Bun project, you can try this prompt from bun project template first:
+### `search_bun_docs`
 
-> Read the Bun API docs in `node_modules/bun-types/docs/**.md`.
+Full-text search using SQLite FTS5 with Porter stemming ("running" matches "run", "runs", etc.)
 
-For more reliable access and search capabilities, install this MCP server:
+- **Parameters**: `query` (string), optional `path` filter, optional `limit`
+- **Returns**: Ranked results with title, score, and highlighted snippet
 
-### 📦 Installation
+### `grep_bun_docs`
 
-**Claude Code:**
+Regex pattern matching for exact searches
+
+- **Parameters**: `pattern` (regex), optional `path` filter, optional `flags`, optional `limit`
+- **Returns**: Matches with context snippets
+
+### `read_bun_doc`
+
+Read complete markdown documentation
+
+- **Parameters**: `path` (slug like `runtime/bun-apis` or `guides/http`)
+- **Returns**: Full markdown content
+
+### `list_bun_docs`
+
+Browse available documentation
+
+- **Parameters**: optional `category` filter (e.g., `api/`, `guides/`), optional `limit`
+- **Returns**: List of documents with URIs and descriptions
+
+## 🚀 Installation
+
+### Via Claude Code (recommended)
 
 ```bash
-# Standard installation (uses your local Bun docs)
 claude mcp add bun-docs bunx bun-doc-mcp
 ```
 
-**Manual configuration:**
+### Via npx/bunx
+
+```bash
+bunx bun-doc-mcp
+```
+
+### Manual MCP Configuration
 
 ```json
 {
@@ -41,13 +71,46 @@ claude mcp add bun-docs bunx bun-doc-mcp
 }
 ```
 
-🎉 You're Ready! Happy coding with Bun! 🚀
+## 🔧 Development
 
-### 🔧 Usage
+### Setup
 
-Once installed, your AI assistant can:
+```bash
+bun install
+```
 
-- Access comprehensive Bun documentation
-- Suggest appropriate Bun APIs over Node.js alternatives
-- Help with Bun-specific features and best practices
-- Provide accurate answers based on current documentation
+### Build
+
+```bash
+bun run build
+```
+
+### Test
+
+```bash
+bun run test        # Run all tests
+bun run test:e2e    # Run E2E tests only
+```
+
+### Lint & Type Check
+
+```bash
+bun run lint
+bun run typecheck
+```
+
+## 📁 How It Works
+
+1. **First run**: Downloads Bun docs from GitHub (matching your Bun version) using sparse checkout
+2. **Indexing**: Builds SQLite FTS5 search index with BM25 ranking
+3. **Caching**: Stores docs and search index in `~/.cache/bun-doc-mcp/{version}/`
+4. **Subsequent runs**: Uses cached docs (re-downloads if corrupted)
+
+## 📝 Usage Examples
+
+Once installed, ask your AI assistant:
+
+- "Search for WebSocket server examples" → uses `search_bun_docs`
+- "Show me the Bun.serve() API documentation" → uses `read_bun_doc`
+- "Find all examples using SQLite" → uses `grep_bun_docs`
+- "List all available guides" → uses `list_bun_docs`

@@ -749,8 +749,8 @@ async function grepDocuments(
           snippet: snippet,
         });
       }
-    } catch {
-      // Skip files that can't be read
+    } catch (error) {
+      console.error(`Failed to read ${resource.filePath}:`, error);
     }
   }
 
@@ -796,6 +796,7 @@ const server = new McpServer(
   {
     capabilities: {
       tools: {},
+      resources: {},
     },
     instructions: `This MCP server provides access to Bun documentation with full-text search (FTS5 + BM25 ranking).
 
@@ -861,9 +862,15 @@ Examples:
         ],
       };
     } catch (error) {
-      throw new Error(
-        `Search error: ${error instanceof Error ? error.message : 'Unknown error'}`
-      );
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Search error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          },
+        ],
+        isError: true,
+      };
     }
   }
 );
@@ -909,9 +916,15 @@ Examples:
         ],
       };
     } catch (error) {
-      throw new Error(
-        `Grep error: ${error instanceof Error ? error.message : 'Unknown error'}`
-      );
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Grep error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          },
+        ],
+        isError: true,
+      };
     }
   }
 );
@@ -927,15 +940,27 @@ server.registerTool(
     },
   },
   async ({ path }) => {
-    const content = await readDocument(path);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: content,
-        },
-      ],
-    };
+    try {
+      const content = await readDocument(path);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: content,
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Read error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          },
+        ],
+        isError: true,
+      };
+    }
   }
 );
 
