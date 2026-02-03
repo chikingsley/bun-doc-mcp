@@ -49,8 +49,7 @@
     "lint:fix": "eslint *.ts --fix",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests/*.test.ts",
-    "test:e2e": "bun test tests/e2e.test.ts --timeout 30000",
-    "prepare": "husky"
+    "test:e2e": "bun test tests/e2e.test.ts --timeout 30000"
   },
   "lint-staged": {
     "*.ts": [
