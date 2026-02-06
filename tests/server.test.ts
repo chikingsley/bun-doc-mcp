@@ -173,6 +173,62 @@ describe('MCP Server Integration Tests', () => {
     expect(content[0]?.text).toContain('Read error');
   });
 
+  test('read_bun_doc paginates large documents', async () => {
+    if (!client) {
+      console.log('Skipping - no client');
+      return;
+    }
+
+    const result = await client.callTool({
+      name: 'read_bun_doc',
+      arguments: { path: 'index', maxLines: 10 },
+    });
+
+    expect(result).toBeDefined();
+    expect(result.isError).toBeFalsy();
+    const content = result.content as Array<{ type: string; text: string }>;
+    const text = content[0]?.text ?? '';
+    expect(text).toContain('[Truncated:');
+    expect(text).toContain('Use offset=10 to continue reading.');
+  });
+
+  test('read_bun_doc returns full content with maxLines=0', async () => {
+    if (!client) {
+      console.log('Skipping - no client');
+      return;
+    }
+
+    const result = await client.callTool({
+      name: 'read_bun_doc',
+      arguments: { path: 'index', maxLines: 0 },
+    });
+
+    expect(result).toBeDefined();
+    expect(result.isError).toBeFalsy();
+    const content = result.content as Array<{ type: string; text: string }>;
+    const text = content[0]?.text ?? '';
+    expect(text).not.toContain('[Truncated:');
+  });
+
+  test('read_bun_doc strips frontmatter', async () => {
+    if (!client) {
+      console.log('Skipping - no client');
+      return;
+    }
+
+    const result = await client.callTool({
+      name: 'read_bun_doc',
+      arguments: { path: 'index', maxLines: 0 },
+    });
+
+    expect(result).toBeDefined();
+    expect(result.isError).toBeFalsy();
+    const content = result.content as Array<{ type: string; text: string }>;
+    const text = content[0]?.text ?? '';
+    // Frontmatter starts with --- and shouldn't be present
+    expect(text.startsWith('---')).toBe(false);
+  });
+
   test('can call search_bun_docs', async () => {
     if (!client) {
       console.log('Skipping - no client');

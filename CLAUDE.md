@@ -32,7 +32,7 @@ This MCP server downloads Bun documentation from GitHub and provides access thro
 - `search_bun_docs`: **recommended** - full-text search with BM25 ranking, returns snippets with context
 - `grep_bun_docs`: regex search for exact pattern matching
 - `list_bun_docs`: browse documentation by category
-- `read_bun_doc`: return raw markdown for a documentation slug
+- `read_bun_doc`: return markdown for a documentation slug (paginated, default 200 lines; use `maxLines`/`offset` for control, `maxLines: 0` for full content)
 
 ## Development Guidelines
 
@@ -70,8 +70,11 @@ echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_bun_docs","a
 # Test listing docs by category
 echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_bun_docs","arguments":{"category":"runtime/http"}},"id":1}' | bun run index.ts 2>/dev/null | jq '.result.content[0].text | fromjson'
 
-# Test reading a document by slug
+# Test reading a document by slug (paginated, default 200 lines)
 echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_bun_doc","arguments":{"path":"runtime/bun-apis"}},"id":1}' | bun run index.ts 2>/dev/null | jq -r '.result.content[0].text' | head -20
+
+# Test reading with custom pagination
+echo '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_bun_doc","arguments":{"path":"runtime/sql","maxLines":50}},"id":1}' | bun run index.ts 2>/dev/null | jq -r '.result.content[0].text' | tail -5
 ```
 
 ## Important Notes

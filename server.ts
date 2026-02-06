@@ -100,8 +100,19 @@ export async function createMcpServer(
     }));
   }
 
+  function stripFrontmatter(content: string): string {
+    if (!content.startsWith('---')) return content;
+    const endIdx = content.indexOf('---', 3);
+    if (endIdx === -1) return content;
+    return content.slice(endIdx + 3).replace(/^\n+/, '');
+  }
+
   // Read document function
-  async function readDocument(input: string): Promise<string> {
+  async function readDocument(
+    input: string,
+    maxLines: number = 200,
+    offset: number = 0
+  ): Promise<string> {
     let value = input.trim();
     if (!value) {
       throw new Error('Document slug is required');
@@ -125,7 +136,28 @@ export async function createMcpServer(
       throw new Error(`Requested slug is not a document: ${input}`);
     }
     const file = Bun.file(resource.filePath);
-    return file.text();
+    const raw = await file.text();
+    const content = stripFrontmatter(raw);
+
+    if (maxLines === 0) return content;
+
+    const lines = content.split('\n');
+    const totalLines = lines.length;
+
+    if (offset >= totalLines) {
+      return `[No content: offset ${offset} exceeds document length of ${totalLines} lines.]`;
+    }
+
+    const sliced = lines.slice(offset, offset + maxLines);
+    const endLine = Math.min(offset + maxLines, totalLines);
+
+    if (endLine < totalLines) {
+      sliced.push(
+        `\n[Truncated: showing lines ${offset + 1}-${endLine} of ${totalLines}. Use offset=${endLine} to continue reading.]`
+      );
+    }
+
+    return sliced.join('\n');
   }
 
   // Register tools
@@ -149,7 +181,7 @@ export async function createMcpServer(
           content: [
             {
               type: 'text',
-              text: JSON.stringify(results, null, 2),
+              text: JSON.stringify(results),
             },
           ],
         };
@@ -175,11 +207,21 @@ export async function createMcpServer(
         path: z
           .string()
           .describe('Slug of the document to read (e.g., runtime/bun-apis)'),
+        maxLines: z
+          .number()
+          .optional()
+          .describe(
+            'Maximum lines to return (default: 200, 0 = unlimited). Truncated docs include a continuation hint.'
+          ),
+        offset: z
+          .number()
+          .optional()
+          .describe('Line offset to start reading from (default: 0)'),
       },
     },
-    async ({ path }) => {
+    async ({ path, maxLines = 200, offset = 0 }) => {
       try {
-        const content = await readDocument(path);
+        const content = await readDocument(path, maxLines, offset);
         return {
           content: [
             {
@@ -239,7 +281,7 @@ export async function createMcpServer(
         content: [
           {
             type: 'text',
-            text: JSON.stringify(results, null, 2),
+            text: JSON.stringify(results),
           },
         ],
       };

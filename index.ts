@@ -574,6 +574,13 @@ function parseFrontmatter(content: string): {
   };
 }
 
+function stripFrontmatter(content: string): string {
+  if (!content.startsWith('---')) return content;
+  const endIdx = content.indexOf('---', 3);
+  if (endIdx === -1) return content;
+  return content.slice(endIdx + 3).replace(/^\n+/, '');
+}
+
 function extractSummary(content: string, maxLength: number = 300): string {
   // Remove frontmatter
   let text = content;
@@ -775,7 +782,11 @@ function normalizeSlug(input: string): string {
   return `buncument://${value}`;
 }
 
-async function readDocument(input: string): Promise<string> {
+async function readDocument(
+  input: string,
+  maxLines: number = 200,
+  offset: number = 0
+): Promise<string> {
   const key = normalizeSlug(input);
   const resource = RESOURCE_INDEX.get(key);
   if (!resource) {
@@ -785,7 +796,28 @@ async function readDocument(input: string): Promise<string> {
     throw new Error(`Requested slug is not a document: ${input}`);
   }
   const file = Bun.file(resource.filePath);
-  return file.text();
+  const raw = await file.text();
+  const content = stripFrontmatter(raw);
+
+  if (maxLines === 0) return content;
+
+  const lines = content.split('\n');
+  const totalLines = lines.length;
+
+  if (offset >= totalLines) {
+    return `[No content: offset ${offset} exceeds document length of ${totalLines} lines.]`;
+  }
+
+  const sliced = lines.slice(offset, offset + maxLines);
+  const endLine = Math.min(offset + maxLines, totalLines);
+
+  if (endLine < totalLines) {
+    sliced.push(
+      `\n[Truncated: showing lines ${offset + 1}-${endLine} of ${totalLines}. Use offset=${endLine} to continue reading.]`
+    );
+  }
+
+  return sliced.join('\n');
 }
 
 const server = new McpServer(
@@ -857,7 +889,7 @@ Examples:
         content: [
           {
             type: 'text',
-            text: JSON.stringify(results, null, 2),
+            text: JSON.stringify(results),
           },
         ],
       };
@@ -911,7 +943,7 @@ Examples:
         content: [
           {
             type: 'text',
-            text: JSON.stringify(results, null, 2),
+            text: JSON.stringify(results),
           },
         ],
       };
@@ -937,11 +969,21 @@ server.registerTool(
       path: z
         .string()
         .describe('Slug of the document to read (e.g., runtime/bun-apis)'),
+      maxLines: z
+        .number()
+        .optional()
+        .describe(
+          'Maximum lines to return (default: 200, 0 = unlimited). Truncated docs include a continuation hint.'
+        ),
+      offset: z
+        .number()
+        .optional()
+        .describe('Line offset to start reading from (default: 0)'),
     },
   },
-  async ({ path }) => {
+  async ({ path, maxLines = 200, offset = 0 }) => {
     try {
-      const content = await readDocument(path);
+      const content = await readDocument(path, maxLines, offset);
       return {
         content: [
           {
@@ -1009,7 +1051,7 @@ Categories: API, Runtime, Bundler, Test, Package manager, Guides, Ecosystem`,
       content: [
         {
           type: 'text',
-          text: JSON.stringify(results, null, 2),
+          text: JSON.stringify(results),
         },
       ],
     };
