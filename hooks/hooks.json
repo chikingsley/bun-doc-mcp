@@ -1,0 +1,13 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "Check if this Bash command is installing a Node.js package that has a Bun-native alternative. Look at the command being run.\n\nIf the command contains `bun add`, `bun install`, `bunx`, `npm install`, `npm add`, `yarn add`, or `pnpm add` with ANY of these packages, respond with a warning:\n\n**Web Frameworks** (use `Bun.serve()` instead):\n- express, koa, hapi, @hapi/hapi, fastify, polka, micro\n\n**Database Clients** (use Bun-native alternatives):\n- pg, postgres, postgres.js → use `Bun.sql` (built-in Postgres client)\n- better-sqlite3, sql.js → use `bun:sqlite` (built-in SQLite)\n- ioredis, redis → use `Bun.redis` (built-in Redis client)\n\n**WebSocket** (built into Bun.serve):\n- ws, socket.io, engine.io\n\n**HTTP/Fetch** (built into Bun):\n- node-fetch, cross-fetch, undici, axios, got, ky, superagent\n\n**Process/Shell** (use `Bun.$` or `Bun.spawn`):\n- execa, shelljs, cross-spawn, npm-run-all\n\n**File utilities** (use Bun.file/Bun.write/Bun.Glob):\n- glob, fast-glob, globby, fs-extra, graceful-fs, chokidar\n\n**Env** (use `Bun.env` - loads .env automatically):\n- dotenv, dotenv-expand\n\n**Crypto/Hashing** (use `Bun.password`, `Bun.hash`, `Bun.CryptoHasher`):\n- bcrypt, bcryptjs, argon2\n\n**Testing** (use `bun:test`):\n- jest, vitest, mocha, chai, jasmine\n\n**Bundler** (use `Bun.build()`):\n- webpack, esbuild, rollup, parcel, tsup, unbuild\n\nIf a flagged package is detected, respond with EXACTLY this format:\n⚠️ Bun Alternative Available\n\n`<package-name>` has a Bun-native replacement: **<bun-alternative>**\n\nThe Bun-native version is faster, has zero dependencies, and is built into the runtime. Consider using it instead.\n\nUse `search_bun_docs` to look up the Bun-native API for detailed usage.\n\nIf the command does NOT match any flagged packages, respond with an empty string (allow it through silently)."
+        }
+      ]
+    }
+  ]
+}

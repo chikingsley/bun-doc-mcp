@@ -1,0 +1,13 @@
+{
+  "name": "bun-docs",
+  "version": "1.0.0",
+  "description": "Makes Claude a Bun expert. Provides Bun-native API knowledge, intercepts Node.js anti-patterns, and offers migration tools - backed by searchable Bun documentation.",
+  "author": {
+    "name": "chikingsley",
+    "email": "chi@peacockery.studio",
+    "url": "https://github.com/chikingsley"
+  },
+  "repository": "https://github.com/chikingsley/bun-mcp-server",
+  "license": "MIT",
+  "keywords": ["bun", "documentation", "migration", "node-to-bun", "apis"]
+}

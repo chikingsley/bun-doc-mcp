@@ -1,116 +1,117 @@
-# <img src="https://bun.com/logo.svg" height="20"> Bun Documentation MCP
+# <img src="https://bun.com/logo.svg" height="20"> Bun Documentation MCP + Claude Code Plugin
 
-A Model Context Protocol (MCP) server that provides intelligent access to [Bun](https://bun.com) documentation. Enables AI assistants to search, read, and query Bun docs with full-text search capabilities.
+A Model Context Protocol (MCP) server and Claude Code plugin that makes Claude a Bun expert. Provides intelligent access to [Bun](https://bun.com) documentation with full-text search, plus skills, commands, and hooks that proactively guide you toward Bun-native APIs.
 
-## ✨ Features
+## What's Included
 
-- **📚 Full-text search**: SQLite FTS5 with BM25 ranking for fast, relevant search results
-- **🔍 Regex search**: JavaScript regex support for precise pattern matching
-- **📖 Document reading**: Access complete markdown documentation by slug
-- **📑 Document listing**: Browse available docs by category
-- **🔄 Version-matched**: Automatically downloads docs matching your Bun version from GitHub
-- **⚡ Fast local caching**: Docs cached in `~/.cache/bun-mcp-server/` with SQLite search index
-- **🤖 AI-optimized**: Structured for AI assistants with relevance scoring and context snippets
+### MCP Server (4 tools)
 
-## 🛠️ Available Tools
+| Tool              | Description                                      |
+| ----------------- | ------------------------------------------------ |
+| `search_bun_docs` | Full-text search with SQLite FTS5 + BM25 ranking |
+| `grep_bun_docs`   | JavaScript regex pattern matching                |
+| `read_bun_doc`    | Read markdown documentation by slug (paginated)  |
+| `list_bun_docs`   | Browse docs by category                          |
 
-### `search_bun_docs`
+### Claude Code Plugin
 
-Full-text search using SQLite FTS5 with Porter stemming ("running" matches "run", "runs", etc.)
+| Component      | Description                                                                                               |
+| -------------- | --------------------------------------------------------------------------------------------------------- |
+| **3 Skills**   | Pre-loaded knowledge: Bun-native APIs, Node-to-Bun migration recipes, testing/bundling/package management |
+| **1 Agent**    | `bun-optimizer` - proactively scans JS/TS files for Node.js patterns that should be Bun-native            |
+| **2 Commands** | `/bun-docs:bun-check` (audit project) and `/bun-docs:bun-migrate` (migrate a package/file)                |
+| **1 Hook**     | Intercepts `bun add express` (and 40+ other packages) with Bun-native alternative warnings                |
 
-- **Parameters**: `query` (string), optional `path` filter, optional `limit`
-- **Returns**: Ranked results with title, score, and highlighted snippet
+## Installation
 
-### `grep_bun_docs`
+### As a Claude Code Plugin (recommended)
 
-Regex pattern matching for exact searches
+```bash
+# Add the marketplace
+/plugin marketplace add chikingsley/bun-mcp-server
 
-- **Parameters**: `pattern` (regex), optional `path` filter, optional `flags`, optional `limit`
-- **Returns**: Matches with context snippets
+# Install the plugin
+/plugin install bun-docs@bun-plugins
+```
 
-### `read_bun_doc`
+This gives you everything: MCP tools, skills, commands, agent, and hooks.
 
-Read complete markdown documentation
+### MCP Server Only
 
-- **Parameters**: `path` (slug like `runtime/bun-apis` or `guides/http`)
-- **Returns**: Full markdown content
-
-### `list_bun_docs`
-
-Browse available documentation
-
-- **Parameters**: optional `category` filter (e.g., `api/`, `guides/`), optional `limit`
-- **Returns**: List of documents with URIs and descriptions
-
-## 🚀 Installation
-
-### Via Claude Code (recommended)
+If you just want the documentation search tools:
 
 ```bash
 claude mcp add bun-docs bunx bun-mcp-server
 ```
 
-### Via npx/bunx
+### Local Plugin (for development)
 
 ```bash
-bunx bun-mcp-server
+# Symlink into your global plugins directory
+mkdir -p ~/.claude/plugins
+ln -s /path/to/bun-doc-mcp ~/.claude/plugins/bun-docs
 ```
 
-### Manual MCP Configuration
+## Usage
 
-```json
-{
-  "mcpServers": {
-    "bun-docs": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["bun-mcp-server"],
-      "env": {}
-    }
-  }
-}
+### Skills (automatic)
+
+Just ask questions - Claude automatically activates the right skill:
+
+- "How do I create an HTTP server in Bun?" (activates bun-apis skill)
+- "Migrate this Express app to Bun" (activates bun-migration skill)
+- "How do I write tests with bun:test?" (activates bun-testing skill)
+
+### Commands
+
+```text
+/bun-docs:bun-check              # Scan project for Node.js anti-patterns
+/bun-docs:bun-check package.json # Audit specific file
+/bun-docs:bun-migrate express    # Migrate a specific package to Bun-native
+/bun-docs:bun-migrate src/db.ts  # Migrate a specific file
 ```
 
-## 🔧 Development
+### Hook (automatic)
 
-### Setup
+When Claude runs `bun add express`, `bun add pg`, `bun add ws`, or any of 40+ Node.js packages, you'll see a warning like:
+
+> **Bun Alternative Available**
+> `express` has a Bun-native replacement: **Bun.serve()**
+
+### Agent (automatic)
+
+After Claude writes or edits JS/TS files, the `bun-optimizer` agent can proactively scan for Node.js patterns and suggest Bun-native replacements.
+
+## Packages Intercepted by Hook
+
+**Web Frameworks**: express, koa, hapi, fastify, polka, micro
+**Database**: pg, postgres, better-sqlite3, ioredis, redis
+**WebSocket**: ws, socket.io, engine.io
+**HTTP**: node-fetch, cross-fetch, axios, got, ky, superagent
+**Shell**: execa, shelljs, cross-spawn
+**Files**: glob, fast-glob, globby, fs-extra, chokidar
+**Env**: dotenv, dotenv-expand
+**Crypto**: bcrypt, bcryptjs, argon2
+**Testing**: jest, vitest, mocha, chai, jasmine
+**Bundler**: webpack, esbuild, rollup, parcel, tsup
+
+## Development
 
 ```bash
 bun install
-```
-
-### Build
-
-```bash
 bun run build
-```
-
-### Test
-
-```bash
-bun run test        # Run all tests
-bun run test:e2e    # Run E2E tests only
-```
-
-### Lint & Type Check
-
-```bash
+bun run test
 bun run lint
 bun run typecheck
 ```
 
-## 📁 How It Works
+## How the MCP Server Works
 
-1. **First run**: Downloads Bun docs from GitHub (matching your Bun version) using sparse checkout
-2. **Indexing**: Builds SQLite FTS5 search index with BM25 ranking
-3. **Caching**: Stores docs and search index in `~/.cache/bun-doc-mcp/{version}/`
-4. **Subsequent runs**: Uses cached docs (re-downloads if corrupted)
+1. Downloads Bun docs from GitHub (matching your Bun version) via sparse checkout
+2. Builds SQLite FTS5 search index with BM25 ranking
+3. Caches docs and index in `~/.cache/bun-mcp-server/{version}/`
+4. Serves search, read, and browse tools over stdio
 
-## 📝 Usage Examples
+## License
 
-Once installed, ask your AI assistant:
-
-- "Search for WebSocket server examples" → uses `search_bun_docs`
-- "Show me the Bun.serve() API documentation" → uses `read_bun_doc`
-- "Find all examples using SQLite" → uses `grep_bun_docs`
-- "List all available guides" → uses `list_bun_docs`
+MIT

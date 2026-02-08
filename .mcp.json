@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bun-docs": {
+      "command": "bunx",
+      "args": ["bun-mcp-server"]
+    }
+  }
+}

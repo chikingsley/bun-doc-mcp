@@ -1,0 +1,15 @@
+{
+  "name": "bun-plugins",
+  "owner": {
+    "name": "chikingsley",
+    "email": "chi@peacockery.studio"
+  },
+  "plugins": [
+    {
+      "name": "bun-docs",
+      "source": ".",
+      "description": "Makes Claude a Bun expert with native API knowledge, Node.js pattern interception, and migration tools - backed by searchable Bun documentation.",
+      "version": "1.0.0"
+    }
+  ]
+}
