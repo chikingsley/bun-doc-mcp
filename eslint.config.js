@@ -5,7 +5,7 @@ import globals from 'globals';
 export default tseslint.config(
   { ignores: ['dist/'] },
   js.configs.recommended,
-  ...tseslint.configs.recommended,
+  ...tseslint.configs.strict,
   {
     languageOptions: {
       ecmaVersion: 'latest',

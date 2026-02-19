@@ -7,12 +7,43 @@ import { join, dirname } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { $ } from 'bun';
 import { Database } from 'bun:sqlite';
+import { SimpleCache } from './src/cache';
 
 import { getPackageVersion } from './macros.ts' with { type: 'macro' };
 const VERSION = await getPackageVersion();
 
 const DEFAULT_SEARCH_LIMIT = 30;
 const SCHEMA_VERSION = 1;
+
+// Initialize Cache
+const searchCache = new SimpleCache<SearchResult[]>();
+
+// Initialize Worker
+const workerPath = join(import.meta.dir, 'src', 'worker.ts');
+const worker = new Worker(workerPath);
+
+// Worker communication helper
+function workerSearch(query: string, searchPath: string = '', limit: number = DEFAULT_SEARCH_LIMIT): Promise<SearchResult[]> {
+  const cacheKey = `${query}|${searchPath}|${limit}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached) return Promise.resolve(cached);
+
+  return new Promise((resolve, reject) => {
+    const handler = (event: MessageEvent) => {
+      const { type, payload } = event.data;
+      if (type === 'SEARCH_RESULTS') {
+        worker.removeEventListener('message', handler);
+        searchCache.set(cacheKey, payload);
+        resolve(payload);
+      } else if (type === 'ERROR') {
+        worker.removeEventListener('message', handler);
+        reject(new Error(payload));
+      }
+    };
+    worker.addEventListener('message', handler);
+    worker.postMessage({ type: 'SEARCH', payload: { query, searchPath, limit } });
+  });
+}
 
 type IndexedResource = {
   uri: string;
@@ -231,6 +262,9 @@ function initializeSearchDatabase(): Database {
 
 const db = initializeSearchDatabase();
 
+// Tell the worker about the database
+worker.postMessage({ type: 'INIT', payload: { dbPath: DB_PATH } });
+
 // Global resource index
 const RESOURCE_INDEX = new Map<string, IndexedResource>();
 let TOTAL_RESOURCE_COUNT = 0;
@@ -267,18 +301,13 @@ async function parseNavigation(): Promise<Map<string, PageInfo>> {
       const docsJson: DocsJson = await file.json();
 
       for (const tab of docsJson.navigation.tabs) {
-        // Skip tabs without groups (like Reference, Blog, Feedback)
-        if (!tab.groups || tab.groups.length === 0) {
-          continue;
-        }
+        if (!tab.groups || tab.groups.length === 0) continue;
 
         for (const group of tab.groups) {
           if (!group.pages) continue;
 
           for (const pagePath of group.pages) {
-            // pagePath is like "/runtime/bun-apis" - remove leading slash
             const slug = pagePath.replace(/^\//, '');
-            // Extract title from slug (last part, titlecase)
             const parts = slug.split('/');
             const lastPart = parts[parts.length - 1] || slug;
             const title = lastPart
@@ -335,24 +364,22 @@ async function parseNavigation(): Promise<Map<string, PageInfo>> {
 const PAGE_MAP = await parseNavigation();
 
 async function buildResourceIndex(): Promise<void> {
-  // Check if FTS index needs rebuilding
   const countRow = db.query('SELECT COUNT(*) as count FROM docs_fts').get() as {
     count: number;
   };
   const needsFtsRebuild = countRow.count === 0;
 
-  if (needsFtsRebuild) {
-    clearSearchIndex();
-  }
+  const docsToWorker: Array<{
+    uri: string;
+    title: string;
+    category: string;
+    summary: string;
+    content: string;
+  }> = [];
 
-  let navIndexed = 0;
-  let navMissing = 0;
   for (const [slug, pageInfo] of PAGE_MAP.entries()) {
-    if (pageInfo.disabled || pageInfo.href) {
-      continue;
-    }
+    if (pageInfo.disabled || pageInfo.href) continue;
 
-    // Try multiple file extensions: .md, .mdx, index.md, index.mdx
     let filePath = '';
     const candidates = [
       join(DOCS_DIR, `${slug}.md`),
@@ -369,7 +396,6 @@ async function buildResourceIndex(): Promise<void> {
     }
 
     if (!filePath) {
-      navMissing++;
       continue;
     }
 
@@ -387,134 +413,64 @@ async function buildResourceIndex(): Promise<void> {
       filePath: filePath,
     });
 
-    // Index in FTS5
     if (needsFtsRebuild) {
-      const file = Bun.file(filePath);
-      const content = await file.text();
-      indexDocument(slug, pageInfo.title, pageInfo.divider, content);
+      const content = await Bun.file(filePath).text();
+      docsToWorker.push({
+        uri: slug,
+        title: pageInfo.title,
+        category: pageInfo.divider,
+        summary: extractSummary(content),
+        content,
+      });
     }
-
-    navIndexed++;
   }
-  print(
-    `Indexed ${navIndexed} nav pages${navMissing > 0 ? ` (${navMissing} missing)` : ''}`
-  );
 
   const guidesDir = join(DOCS_DIR, 'guides');
-  let guidesIndexed = 0;
   if (existsSync(guidesDir)) {
     RESOURCE_INDEX.set('buncument://guides', {
       uri: 'buncument://guides',
       name: 'Guides',
-      description:
-        'A collection of code samples and walkthroughs for performing common tasks with Bun.',
+      description: 'A collection of code samples and walkthroughs for performing common tasks with Bun.',
       mimeType: 'application/json',
       isDirectory: true,
     });
 
-    const allMdFiles =
-      await Bun.$`find ${guidesDir} -type f -name "*.md" 2>/dev/null`
-        .text()
-        .catch(() => '');
-    const allMdxFiles =
-      await Bun.$`find ${guidesDir} -type f -name "*.mdx" 2>/dev/null`
-        .text()
-        .catch(() => '');
-    const allFiles = allMdFiles + '\n' + allMdxFiles;
-    for (const filePath of allFiles.trim().split('\n').filter(Boolean)) {
-      const relativePath = filePath
-        .replace(DOCS_DIR + '/', '')
-        .replace(/\.mdx?$/, '');
-      const file = Bun.file(filePath);
-      const content = await file.text();
+    const allMdFiles = await Bun.$`find ${guidesDir} -type f \( -name "*.md" -o -name "*.mdx" \) 2>/dev/null`.text();
+    for (const filePath of allMdFiles.trim().split('\n').filter(Boolean)) {
+      const relativePath = filePath.replace(DOCS_DIR + '/', '').replace(/\.mdx?$/, '');
+      const content = await Bun.file(filePath).text();
       const frontmatter = parseFrontmatter(content);
-      const filename =
-        filePath
-          .split('/')
-          .pop()
-          ?.replace(/\.mdx?$/, '') || '';
+      const filename = filePath.split('/').pop()?.replace(/\.mdx?$/, '') || '';
       const firstLine = content.split('\n')[0] || '';
 
       const uri = `buncument://${relativePath}`;
       RESOURCE_INDEX.set(uri, {
         uri: uri,
         name: frontmatter.name || filename,
-        description:
-          frontmatter.description || firstLine.substring(0, 100) || '',
+        description: frontmatter.description || firstLine.substring(0, 100) || '',
         mimeType: 'text/markdown',
         filePath: filePath,
       });
 
-      // Index in FTS5
       if (needsFtsRebuild) {
-        indexDocument(
-          relativePath,
-          frontmatter.name || filename,
-          'Guides',
-          content
-        );
+        docsToWorker.push({
+          uri: relativePath,
+          title: frontmatter.name || filename,
+          category: 'Guides',
+          summary: extractSummary(content),
+          content,
+        });
       }
-
-      guidesIndexed++;
-    }
-
-    const subdirs =
-      await Bun.$`find ${guidesDir} -mindepth 1 -type d 2>/dev/null`
-        .text()
-        .catch(() => '');
-    for (const dirPath of subdirs.trim().split('\n').filter(Boolean)) {
-      const relativePath = dirPath.replace(DOCS_DIR + '/', '');
-      const pathParts = dirPath.split('/');
-      const dirname = pathParts[pathParts.length - 1] || '';
-      const indexPath = join(dirPath, 'index.json');
-      let dirName = dirname;
-      let dirDescription = 'Directory';
-
-      if (existsSync(indexPath)) {
-        try {
-          const indexFile = Bun.file(indexPath);
-          const indexData = await indexFile.json();
-          dirName = indexData.name || dirname;
-          dirDescription = indexData.description || 'Directory';
-        } catch {
-          // Use default values if index.json cannot be read
-        }
-      }
-
-      RESOURCE_INDEX.set(`buncument://${relativePath}`, {
-        uri: `buncument://${relativePath}`,
-        name: dirName,
-        description: dirDescription,
-        mimeType: 'application/json',
-        isDirectory: true,
-      });
     }
   }
-  print(`Indexed ${guidesIndexed} guides files`);
 
   const ecosystemDir = join(DOCS_DIR, 'ecosystem');
-  let ecosystemIndexed = 0;
   if (existsSync(ecosystemDir)) {
-    const allMdFiles =
-      await Bun.$`find ${ecosystemDir} -type f -name "*.md" 2>/dev/null`
-        .text()
-        .catch(() => '');
-    const allMdxFiles =
-      await Bun.$`find ${ecosystemDir} -type f -name "*.mdx" 2>/dev/null`
-        .text()
-        .catch(() => '');
-    const allFiles = allMdFiles + '\n' + allMdxFiles;
-    for (const filePath of allFiles.trim().split('\n').filter(Boolean)) {
-      const relativePath = filePath
-        .replace(DOCS_DIR + '/', '')
-        .replace(/\.mdx?$/, '');
-      const filename =
-        filePath
-          .split('/')
-          .pop()
-          ?.replace(/\.mdx?$/, '') || '';
-      const file = Bun.file(filePath);
-      const content = await file.text();
+    const allMdFiles = await Bun.$`find ${ecosystemDir} -type f \( -name "*.md" -o -name "*.mdx" \) 2>/dev/null`.text();
+    for (const filePath of allMdFiles.trim().split('\n').filter(Boolean)) {
+      const relativePath = filePath.replace(DOCS_DIR + '/', '').replace(/\.mdx?$/, '');
+      const filename = filePath.split('/').pop()?.replace(/\.mdx?$/, '') || '';
+      const content = await Bun.file(filePath).text();
       const firstLine = content.split('\n')[0] || filename;
       const title = filename.charAt(0).toUpperCase() + filename.slice(1);
 
@@ -527,51 +483,54 @@ async function buildResourceIndex(): Promise<void> {
         filePath: filePath,
       });
 
-      // Index in FTS5
       if (needsFtsRebuild) {
-        indexDocument(relativePath, title, 'Ecosystem', content);
+        docsToWorker.push({
+          uri: relativePath,
+          title: title,
+          category: 'Ecosystem',
+          summary: extractSummary(content),
+          content,
+        });
       }
-
-      ecosystemIndexed++;
     }
   }
-  print(`Indexed ${ecosystemIndexed} ecosystem files`);
+
+  if (needsFtsRebuild && docsToWorker.length > 0) {
+    print(`Rebuilding FTS index with ${docsToWorker.length} documents...`);
+    await new Promise((resolve, reject) => {
+      const handler = (event: MessageEvent) => {
+        const { type, payload } = event.data;
+        if (type === 'REBUILD_SUCCESS') {
+          worker.removeEventListener('message', handler);
+          resolve(null);
+        } else if (type === 'ERROR') {
+          worker.removeEventListener('message', handler);
+          reject(new Error(payload));
+        }
+      };
+      worker.addEventListener('message', handler);
+      worker.postMessage({ type: 'REBUILD_INDEX', payload: docsToWorker });
+    });
+  }
 
   TOTAL_RESOURCE_COUNT = RESOURCE_INDEX.size;
-  const ftsCount = (
-    db.query('SELECT COUNT(*) as count FROM docs_fts').get() as {
-      count: number;
-    }
-  ).count;
-  print(`Total indexed resources: ${TOTAL_RESOURCE_COUNT} (FTS: ${ftsCount})`);
+  print(`Total indexed resources: ${TOTAL_RESOURCE_COUNT}`);
 }
 
-await buildResourceIndex();
-
-function parseFrontmatter(content: string): {
-  name?: string;
-  description?: string;
-} {
+function parseFrontmatter(content: string): { name?: string; description?: string } {
   const lines = content.split('\n');
   if (lines[0] !== '---') return {};
-
   const frontmatter: Record<string, string> = {};
   let i = 1;
   while (i < lines.length && lines[i] !== '---') {
     const line = lines[i];
     if (line) {
       const match = line.match(/^(\w+):\s*(.*)$/);
-      if (match && match[1] && match[2]) {
-        frontmatter[match[1]] = match[2];
-      }
+      if (match && match[1] && match[2]) frontmatter[match[1]] = match[2];
     }
     i++;
   }
-
-  return {
-    name: frontmatter.name,
-    description: frontmatter.description,
-  };
+  return { name: frontmatter.name, description: frontmatter.description };
 }
 
 function stripFrontmatter(content: string): string {
@@ -582,327 +541,73 @@ function stripFrontmatter(content: string): string {
 }
 
 function extractSummary(content: string, maxLength: number = 300): string {
-  // Remove frontmatter
   let text = content;
   if (text.startsWith('---')) {
     const endIdx = text.indexOf('---', 3);
-    if (endIdx !== -1) {
-      text = text.slice(endIdx + 3);
-    }
+    if (endIdx !== -1) text = text.slice(endIdx + 3);
   }
-
-  // Remove markdown headers, code blocks, and links
   text = text
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/```[\s\S]*?```/g, '')
     .replace(/`[^`]+`/g, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/!\[([^\]]*)\]\([^)]+\)/g, '')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/^\s*[-*+]\s+/gm, '')
     .replace(/\n+/g, ' ')
     .trim();
-
-  // Cut at sentence boundary if possible
-  if (text.length > maxLength) {
-    const truncated = text.slice(0, maxLength);
-    const lastSentence = truncated.lastIndexOf('. ');
-    if (lastSentence > maxLength * 0.5) {
-      return truncated.slice(0, lastSentence + 1);
-    }
-    return truncated + '...';
-  }
+  if (text.length > maxLength) return text.slice(0, maxLength) + '...';
   return text;
 }
 
-function indexDocument(
-  uri: string,
-  title: string,
-  category: string,
-  content: string
-): void {
-  const summary = extractSummary(content);
-  const insertStmt = db.prepare(
-    'INSERT INTO docs_fts (uri, title, category, summary, content) VALUES (?, ?, ?, ?, ?)'
-  );
-  insertStmt.run(uri, title, category, summary, content);
-}
+await buildResourceIndex();
 
-function clearSearchIndex(): void {
-  db.exec('DELETE FROM docs_fts');
-}
-
-function sanitizeFtsQuery(query: string): string {
-  // Escape special FTS5 characters and quote each term
-  // FTS5 special chars: " * ^ : OR AND NOT NEAR ( )
-  return query
-    .split(/\s+/)
-    .filter((term) => term.length > 0)
-    .map((term) => {
-      // Remove or escape special characters
-      const cleaned = term.replace(/[":*^()]/g, '');
-      if (!cleaned) return null;
-      // Quote the term to treat it as literal
-      return `"${cleaned}"`;
-    })
-    .filter(Boolean)
-    .join(' OR ');
-}
-
-function searchDocuments(
-  query: string,
-  searchPath: string = '',
-  limit: number = DEFAULT_SEARCH_LIMIT
-): SearchResult[] {
-  const sanitizedQuery = sanitizeFtsQuery(query);
-  if (!sanitizedQuery) {
-    return [];
-  }
-
-  // Build query with optional path filter
-  let sql = `
-    SELECT
-      uri,
-      title,
-      bm25(docs_fts, 1.0, 2.0, 1.5, 3.0, 1.0) as score,
-      snippet(docs_fts, 4, '>>>', '<<<', '...', 32) as snippet
-    FROM docs_fts
-    WHERE docs_fts MATCH ?
-  `;
-
-  const params: (string | number)[] = [sanitizedQuery];
-
-  if (searchPath) {
-    sql += ` AND uri LIKE ?`;
-    params.push(`${searchPath}%`);
-  }
-
-  sql += ` ORDER BY score LIMIT ?`;
-  params.push(limit);
-
-  const stmt = db.prepare(sql);
-  const rows = stmt.all(...params) as Array<{
-    uri: string;
-    title: string;
-    score: number;
-    snippet: string;
-  }>;
-
-  return rows.map((row) => ({
-    uri: `buncument://${row.uri}`,
-    title: row.title,
-    score: Math.round(-row.score * 100) / 100, // Negate BM25 (lower is better) and round
-    snippet: row.snippet.replace(/>>>/g, '**').replace(/<<</g, '**'),
-  }));
-}
-
-// Keep regex search as fallback for complex patterns
-async function grepDocuments(
-  pattern: string,
-  searchPath: string = '',
-  limit: number = DEFAULT_SEARCH_LIMIT,
-  flags: string = 'gi'
-): Promise<SearchResult[]> {
-  const allowedFlags = ['g', 'i', 'm', 'u', 'y', 's'];
-  const flagList = flags
-    ? Array.from(
-        new Set(flags.split('').filter((flag) => allowedFlags.includes(flag)))
-      )
-    : [];
-  if (!flagList.includes('g')) {
-    flagList.push('g');
-  }
-  const finalFlags = flagList.join('') || 'g';
-
-  let regex: RegExp;
-  try {
-    regex = new RegExp(pattern, finalFlags);
-  } catch {
-    throw new Error(`Invalid regular expression: ${pattern}`);
-  }
-
+async function grepDocuments(pattern: string, searchPath: string = '', limit: number = DEFAULT_SEARCH_LIMIT, flags: string = 'gi'): Promise<SearchResult[]> {
+  const regex = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
   const results: SearchResult[] = [];
-
   for (const [uri, resource] of RESOURCE_INDEX.entries()) {
-    if (resource.isDirectory || !resource.filePath) {
-      continue;
-    }
-
-    if (searchPath) {
-      const resourcePath = uri.replace('buncument://', '');
-      if (!resourcePath.startsWith(searchPath)) {
-        continue;
-      }
-    }
-
+    if (resource.isDirectory || !resource.filePath) continue;
+    if (searchPath && !uri.replace('buncument://', '').startsWith(searchPath)) continue;
     try {
-      const file = Bun.file(resource.filePath);
-      const content = await file.text();
+      const content = await Bun.file(resource.filePath).text();
       const matches = content.match(regex);
-      if (matches && matches.length > 0) {
-        // Generate snippet around first match
+      if (matches) {
         const matchIndex = content.search(regex);
         const start = Math.max(0, matchIndex - 50);
         const end = Math.min(content.length, matchIndex + 100);
-        let snippet = content.slice(start, end).replace(/\n+/g, ' ').trim();
-        if (start > 0) snippet = '...' + snippet;
-        if (end < content.length) snippet = snippet + '...';
-
-        results.push({
-          uri: resource.uri,
-          title: resource.name,
-          score: matches.length,
-          snippet: snippet,
-        });
+        const snippet = content.slice(start, end).replace(/\n+/g, ' ').trim();
+        results.push({ uri, title: resource.name, score: matches.length, snippet: `...${snippet}...` });
       }
-    } catch (error) {
-      console.error(`Failed to read ${resource.filePath}:`, error);
+    } catch {
+      // Ignore read errors
     }
+    if (results.length >= limit * 2) break;
   }
-
   return results.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
-function normalizeSlug(input: string): string {
-  let value = input.trim();
-  if (!value) {
-    throw new Error('Document slug is required');
-  }
-  if (value.includes('://')) {
-    throw new Error('Use documentation slugs like runtime/bun-apis');
-  }
-  value = value.replace(/^\/+/, '').replace(/\/+$/, '');
-  if (value.endsWith('.md')) {
-    value = value.slice(0, -3);
-  }
-  if (!value) {
-    throw new Error('Document slug is required');
-  }
-  return `buncument://${value}`;
-}
-
-async function readDocument(
-  input: string,
-  maxLines: number = 200,
-  offset: number = 0
-): Promise<string> {
-  const key = normalizeSlug(input);
-  const resource = RESOURCE_INDEX.get(key);
-  if (!resource) {
-    throw new Error(`Document not found for slug: ${input}`);
-  }
-  if (!resource.filePath || resource.isDirectory) {
-    throw new Error(`Requested slug is not a document: ${input}`);
-  }
-  const file = Bun.file(resource.filePath);
-  const raw = await file.text();
-  const content = stripFrontmatter(raw);
-
-  if (maxLines === 0) return content;
-
-  const lines = content.split('\n');
-  const totalLines = lines.length;
-
-  if (offset >= totalLines) {
-    return `[No content: offset ${offset} exceeds document length of ${totalLines} lines.]`;
-  }
-
-  const sliced = lines.slice(offset, offset + maxLines);
-  const endLine = Math.min(offset + maxLines, totalLines);
-
-  if (endLine < totalLines) {
-    sliced.push(
-      `\n[Truncated: showing lines ${offset + 1}-${endLine} of ${totalLines}. Use offset=${endLine} to continue reading.]`
-    );
-  }
-
-  return sliced.join('\n');
-}
-
 const server = new McpServer(
+  { name: 'bun-mcp-server', version: VERSION },
   {
-    name: 'bun-mcp-server',
-    version: VERSION,
-  },
-  {
-    capabilities: {
-      tools: {},
-      resources: {},
-    },
-    instructions: `This MCP server provides access to Bun documentation with full-text search (FTS5 + BM25 ranking).
-
-## How to use:
-- Use **search_bun_docs** for natural language queries (recommended) - uses FTS5 with BM25 ranking
-- Use **grep_bun_docs** for regex patterns when you need exact matching
-- Call **read_bun_doc** with a documentation slug to fetch the full markdown
-
-## APIs
-- \`Bun.serve()\` supports WebSockets, HTTPS, and routes. Don't use \`express\`.
-- \`bun:sqlite\` for SQLite. Don't use \`better-sqlite3\`.
-- \`Bun.redis\` for Redis. Don't use \`ioredis\`.
-- \`Bun.sql\` for Postgres. Don't use \`pg\` or \`postgres.js\`.
-- \`WebSocket\` is built-in. Don't use \`ws\`.
-- Prefer \`Bun.file\` over \`node:fs\`'s readFile/writeFile
-- Bun.$\`ls\` instead of execa.
-
-## Tips:
-- **ALWAYS** read the documents to find if bun have a better version before you start use any node API
-- Check 'api/' for API references, 'guides/' for walkthroughs, and 'runtime/' for runtime specifics
-- Search results include snippets showing context around matches`,
+    capabilities: { tools: {}, resources: {} },
+    instructions: `This MCP server provides access to Bun documentation with optimized Worker-based search and caching.`
   }
 );
 
 server.registerTool(
   'search_bun_docs',
   {
-    description: `Search Bun documentation using full-text search with BM25 ranking.
-Returns: Array of results with uri, title, relevance score, and snippet showing context.
-
-This is the recommended search tool - it uses SQLite FTS5 with Porter stemming,
-so "running" matches "run", "runs", etc.
-
-Examples:
-- Search for WebSocket: query: 'websocket server'
-- Find SQLite APIs: query: 'sqlite database', path: 'api/'
-- Search guides: query: 'http request', path: 'guides/'`,
+    description: 'Search Bun documentation using FTS5 (optimized).',
     inputSchema: {
-      query: z.string().describe('Search query (natural language)'),
-      path: z
-        .string()
-        .optional()
-        .describe(
-          "Optional path prefix to filter results (e.g., 'api/' or 'guides/')"
-        ),
-      limit: z
-        .number()
-        .optional()
-        .describe(
-          `Maximum number of results to return (default: ${DEFAULT_SEARCH_LIMIT})`
-        ),
-    },
+      query: z.string(),
+      path: z.string().optional(),
+      limit: z.number().optional()
+    }
   },
-  ({ query, path, limit = DEFAULT_SEARCH_LIMIT }) => {
+  async ({ query, path, limit }) => {
     try {
-      const results = searchDocuments(query, path, limit);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(results),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Search error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          },
-        ],
-        isError: true,
-      };
+      const results = await workerSearch(query, path, limit);
+      return { content: [{ type: 'text', text: JSON.stringify(results) }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: String(e) }], isError: true };
     }
   }
 );
@@ -910,53 +615,20 @@ Examples:
 server.registerTool(
   'grep_bun_docs',
   {
-    description: `Search Bun documentation using JavaScript regular expressions.
-Use this for exact pattern matching when FTS search isn't precise enough.
-Returns: Array of results with uri, title, match count, and snippet.
-
-Examples:
-- Exact API name: pattern: 'Bun\\.serve'
-- Find all imports: pattern: 'import.*from', path: 'guides/'
-- Complex patterns: pattern: 'Bun\\.(serve|file|write)'`,
+    description: 'Search using Regex.',
     inputSchema: {
-      pattern: z.string().describe('JavaScript regex pattern to search for'),
-      path: z
-        .string()
-        .optional()
-        .describe("Optional path to search in (e.g., 'api/' or 'guides/')"),
-      limit: z
-        .number()
-        .optional()
-        .describe(
-          `Maximum number of results to return (default: ${DEFAULT_SEARCH_LIMIT})`
-        ),
-      flags: z
-        .string()
-        .optional()
-        .describe("Regex flags (default: 'gi' for global case-insensitive)"),
-    },
+      pattern: z.string(),
+      path: z.string().optional(),
+      limit: z.number().optional(),
+      flags: z.string().optional()
+    }
   },
-  async ({ pattern, path, limit = DEFAULT_SEARCH_LIMIT, flags }) => {
+  async ({ pattern, path, limit, flags }) => {
     try {
       const results = await grepDocuments(pattern, path, limit, flags);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(results),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Grep error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          },
-        ],
-        isError: true,
-      };
+      return { content: [{ type: 'text', text: JSON.stringify(results) }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: String(e) }], isError: true };
     }
   }
 );
@@ -964,44 +636,23 @@ Examples:
 server.registerTool(
   'read_bun_doc',
   {
-    description: 'Read a Bun documentation markdown file by slug.',
+    description: 'Read a doc.',
     inputSchema: {
-      path: z
-        .string()
-        .describe('Slug of the document to read (e.g., runtime/bun-apis)'),
-      maxLines: z
-        .number()
-        .optional()
-        .describe(
-          'Maximum lines to return (default: 200, 0 = unlimited). Truncated docs include a continuation hint.'
-        ),
-      offset: z
-        .number()
-        .optional()
-        .describe('Line offset to start reading from (default: 0)'),
-    },
+      path: z.string(),
+      maxLines: z.number().optional(),
+      offset: z.number().optional()
+    }
   },
   async ({ path, maxLines = 200, offset = 0 }) => {
     try {
-      const content = await readDocument(path, maxLines, offset);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: content,
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Read error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-          },
-        ],
-        isError: true,
-      };
+      const slug = path.replace(/^\/+/, '').replace(/\.md$/, '');
+      const resource = RESOURCE_INDEX.get(`buncument://${slug}`);
+      if (!resource?.filePath) throw new Error('Not found');
+      const content = stripFrontmatter(await Bun.file(resource.filePath).text());
+      const lines = content.split('\n');
+      return { content: [{ type: 'text', text: lines.slice(offset, offset + (maxLines || lines.length)).join('\n') }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: String(e) }], isError: true };
     }
   }
 );
@@ -1009,60 +660,18 @@ server.registerTool(
 server.registerTool(
   'list_bun_docs',
   {
-    description: `List available Bun documentation pages, optionally filtered by category.
-Returns: Array of documents with uri, title, and description.
-
-Categories: API, Runtime, Bundler, Test, Package manager, Guides, Ecosystem`,
-    inputSchema: {
-      category: z
-        .string()
-        .optional()
-        .describe(
-          "Optional category to filter by (e.g., 'api/', 'guides/', 'runtime/')"
-        ),
-      limit: z
-        .number()
-        .optional()
-        .describe('Maximum number of results to return (default: 50)'),
-    },
+    description: 'List docs.',
+    inputSchema: { category: z.string().optional(), limit: z.number().optional() }
   },
   ({ category, limit = 50 }) => {
-    const results: Array<{ uri: string; title: string; description: string }> =
-      [];
-
-    for (const [uri, resource] of RESOURCE_INDEX.entries()) {
-      if (resource.isDirectory) continue;
-
-      if (category) {
-        const slug = uri.replace('buncument://', '');
-        if (!slug.startsWith(category)) continue;
-      }
-
-      results.push({
-        uri: uri,
-        title: resource.name,
-        description: resource.description,
-      });
-
-      if (results.length >= limit) break;
-    }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(results),
-        },
-      ],
-    };
+    const results = Array.from(RESOURCE_INDEX.entries())
+      .filter(([uri]) => !category || uri.replace('buncument://', '').startsWith(category))
+      .slice(0, limit)
+      .map(([uri, r]) => ({ uri, title: r.name, description: r.description }));
+    return { content: [{ type: 'text', text: JSON.stringify(results) }] };
   }
 );
 
-if (
-  print(`Bun documents cached in ${DOCS_DIR}, please attach by a MCP client.`)
-) {
-  process.exit(0);
-}
-
 const transport = new StdioServerTransport();
 await server.connect(transport);
+print(`Bun MCP Server v${VERSION} connected via Stdio`);
