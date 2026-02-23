@@ -7,7 +7,6 @@ import { join, dirname } from 'node:path';
 import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { $ } from 'bun';
 import { Database } from 'bun:sqlite';
-import { SimpleCache } from './src/cache';
 
 import { getPackageVersion } from './macros.ts' with { type: 'macro' };
 const VERSION = await getPackageVersion();
@@ -15,34 +14,95 @@ const VERSION = await getPackageVersion();
 const DEFAULT_SEARCH_LIMIT = 30;
 const SCHEMA_VERSION = 1;
 
-// Initialize Cache
-const searchCache = new SimpleCache<SearchResult[]>();
+// Simple TTL cache
+const searchCacheMap = new Map<
+  string,
+  { value: SearchResult[]; expiry: number }
+>();
+const CACHE_TTL = 1000 * 60 * 5;
 
-// Initialize Worker
-const workerPath = join(import.meta.dir, 'src', 'worker.ts');
-const worker = new Worker(workerPath);
+function cacheGet(key: string): SearchResult[] | undefined {
+  const entry = searchCacheMap.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiry) {
+    searchCacheMap.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
 
-// Worker communication helper
-function workerSearch(query: string, searchPath: string = '', limit: number = DEFAULT_SEARCH_LIMIT): Promise<SearchResult[]> {
+function cacheSet(key: string, value: SearchResult[]): void {
+  searchCacheMap.set(key, { value, expiry: Date.now() + CACHE_TTL });
+  if (searchCacheMap.size > 1000) {
+    const now = Date.now();
+    for (const [k, v] of searchCacheMap) {
+      if (now > v.expiry) searchCacheMap.delete(k);
+    }
+  }
+}
+
+// FTS5 search (inline, no Worker)
+function sanitizeFtsQuery(query: string): string {
+  return query
+    .split(/\s+/)
+    .filter((term) => term.length > 0)
+    .map((term) => {
+      const cleaned = term.replace(/[":*^()]/g, '');
+      if (!cleaned) return null;
+      return `"${cleaned}"`;
+    })
+    .filter(Boolean)
+    .join(' OR ');
+}
+
+function searchDocuments(
+  database: Database,
+  query: string,
+  searchPath: string = '',
+  limit: number = DEFAULT_SEARCH_LIMIT
+): SearchResult[] {
+  const sanitized = sanitizeFtsQuery(query);
+  if (!sanitized) return [];
+
+  let sql = `
+    SELECT uri, title, bm25(docs_fts, 1.0, 2.0, 1.5, 3.0, 1.0) as score,
+      snippet(docs_fts, 4, '>>>', '<<<', '...', 32) as snippet
+    FROM docs_fts WHERE docs_fts MATCH ?
+  `;
+  const params: (string | number)[] = [sanitized];
+  if (searchPath) {
+    sql += ` AND uri LIKE ?`;
+    params.push(`${searchPath}%`);
+  }
+  sql += ` ORDER BY score LIMIT ?`;
+  params.push(limit);
+
+  const rows = database.prepare(sql).all(...params) as Array<{
+    uri: string;
+    title: string;
+    score: number;
+    snippet: string;
+  }>;
+  return rows.map((row) => ({
+    uri: `buncument://${row.uri}`,
+    title: row.title,
+    score: Math.round(-row.score * 100) / 100,
+    snippet: row.snippet.replace(/>>>/g, '**').replace(/<<</g, '**'),
+  }));
+}
+
+function ftsSearch(
+  database: Database,
+  query: string,
+  searchPath: string = '',
+  limit: number = DEFAULT_SEARCH_LIMIT
+): SearchResult[] {
   const cacheKey = `${query}|${searchPath}|${limit}`;
-  const cached = searchCache.get(cacheKey);
-  if (cached) return Promise.resolve(cached);
-
-  return new Promise((resolve, reject) => {
-    const handler = (event: MessageEvent) => {
-      const { type, payload } = event.data;
-      if (type === 'SEARCH_RESULTS') {
-        worker.removeEventListener('message', handler);
-        searchCache.set(cacheKey, payload);
-        resolve(payload);
-      } else if (type === 'ERROR') {
-        worker.removeEventListener('message', handler);
-        reject(new Error(payload));
-      }
-    };
-    worker.addEventListener('message', handler);
-    worker.postMessage({ type: 'SEARCH', payload: { query, searchPath, limit } });
-  });
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+  const results = searchDocuments(database, query, searchPath, limit);
+  cacheSet(cacheKey, results);
+  return results;
 }
 
 type IndexedResource = {
@@ -262,9 +322,6 @@ function initializeSearchDatabase(): Database {
 
 const db = initializeSearchDatabase();
 
-// Tell the worker about the database
-worker.postMessage({ type: 'INIT', payload: { dbPath: DB_PATH } });
-
 // Global resource index
 const RESOURCE_INDEX = new Map<string, IndexedResource>();
 let TOTAL_RESOURCE_COUNT = 0;
@@ -430,24 +487,33 @@ async function buildResourceIndex(): Promise<void> {
     RESOURCE_INDEX.set('buncument://guides', {
       uri: 'buncument://guides',
       name: 'Guides',
-      description: 'A collection of code samples and walkthroughs for performing common tasks with Bun.',
+      description:
+        'A collection of code samples and walkthroughs for performing common tasks with Bun.',
       mimeType: 'application/json',
       isDirectory: true,
     });
 
-    const allMdFiles = await Bun.$`find ${guidesDir} -type f \( -name "*.md" -o -name "*.mdx" \) 2>/dev/null`.text();
+    const allMdFiles =
+      await Bun.$`find ${guidesDir} -type f \( -name "*.md" -o -name "*.mdx" \) 2>/dev/null`.text();
     for (const filePath of allMdFiles.trim().split('\n').filter(Boolean)) {
-      const relativePath = filePath.replace(DOCS_DIR + '/', '').replace(/\.mdx?$/, '');
+      const relativePath = filePath
+        .replace(DOCS_DIR + '/', '')
+        .replace(/\.mdx?$/, '');
       const content = await Bun.file(filePath).text();
       const frontmatter = parseFrontmatter(content);
-      const filename = filePath.split('/').pop()?.replace(/\.mdx?$/, '') || '';
+      const filename =
+        filePath
+          .split('/')
+          .pop()
+          ?.replace(/\.mdx?$/, '') || '';
       const firstLine = content.split('\n')[0] || '';
 
       const uri = `buncument://${relativePath}`;
       RESOURCE_INDEX.set(uri, {
         uri: uri,
         name: frontmatter.name || filename,
-        description: frontmatter.description || firstLine.substring(0, 100) || '',
+        description:
+          frontmatter.description || firstLine.substring(0, 100) || '',
         mimeType: 'text/markdown',
         filePath: filePath,
       });
@@ -466,10 +532,17 @@ async function buildResourceIndex(): Promise<void> {
 
   const ecosystemDir = join(DOCS_DIR, 'ecosystem');
   if (existsSync(ecosystemDir)) {
-    const allMdFiles = await Bun.$`find ${ecosystemDir} -type f \( -name "*.md" -o -name "*.mdx" \) 2>/dev/null`.text();
+    const allMdFiles =
+      await Bun.$`find ${ecosystemDir} -type f \( -name "*.md" -o -name "*.mdx" \) 2>/dev/null`.text();
     for (const filePath of allMdFiles.trim().split('\n').filter(Boolean)) {
-      const relativePath = filePath.replace(DOCS_DIR + '/', '').replace(/\.mdx?$/, '');
-      const filename = filePath.split('/').pop()?.replace(/\.mdx?$/, '') || '';
+      const relativePath = filePath
+        .replace(DOCS_DIR + '/', '')
+        .replace(/\.mdx?$/, '');
+      const filename =
+        filePath
+          .split('/')
+          .pop()
+          ?.replace(/\.mdx?$/, '') || '';
       const content = await Bun.file(filePath).text();
       const firstLine = content.split('\n')[0] || filename;
       const title = filename.charAt(0).toUpperCase() + filename.slice(1);
@@ -497,27 +570,31 @@ async function buildResourceIndex(): Promise<void> {
 
   if (needsFtsRebuild && docsToWorker.length > 0) {
     print(`Rebuilding FTS index with ${docsToWorker.length} documents...`);
-    await new Promise((resolve, reject) => {
-      const handler = (event: MessageEvent) => {
-        const { type, payload } = event.data;
-        if (type === 'REBUILD_SUCCESS') {
-          worker.removeEventListener('message', handler);
-          resolve(null);
-        } else if (type === 'ERROR') {
-          worker.removeEventListener('message', handler);
-          reject(new Error(payload));
-        }
-      };
-      worker.addEventListener('message', handler);
-      worker.postMessage({ type: 'REBUILD_INDEX', payload: docsToWorker });
-    });
+    db.exec('BEGIN TRANSACTION');
+    db.exec('DELETE FROM docs_fts');
+    const insertStmt = db.prepare(
+      'INSERT INTO docs_fts (uri, title, category, summary, content) VALUES (?, ?, ?, ?, ?)'
+    );
+    for (const doc of docsToWorker) {
+      insertStmt.run(
+        doc.uri,
+        doc.title,
+        doc.category,
+        doc.summary,
+        doc.content
+      );
+    }
+    db.exec('COMMIT');
   }
 
   TOTAL_RESOURCE_COUNT = RESOURCE_INDEX.size;
   print(`Total indexed resources: ${TOTAL_RESOURCE_COUNT}`);
 }
 
-function parseFrontmatter(content: string): { name?: string; description?: string } {
+function parseFrontmatter(content: string): {
+  name?: string;
+  description?: string;
+} {
   const lines = content.split('\n');
   if (lines[0] !== '---') return {};
   const frontmatter: Record<string, string> = {};
@@ -560,12 +637,18 @@ function extractSummary(content: string, maxLength: number = 300): string {
 
 await buildResourceIndex();
 
-async function grepDocuments(pattern: string, searchPath: string = '', limit: number = DEFAULT_SEARCH_LIMIT, flags: string = 'gi'): Promise<SearchResult[]> {
+async function grepDocuments(
+  pattern: string,
+  searchPath: string = '',
+  limit: number = DEFAULT_SEARCH_LIMIT,
+  flags: string = 'gi'
+): Promise<SearchResult[]> {
   const regex = new RegExp(pattern, flags.includes('g') ? flags : flags + 'g');
   const results: SearchResult[] = [];
   for (const [uri, resource] of RESOURCE_INDEX.entries()) {
     if (resource.isDirectory || !resource.filePath) continue;
-    if (searchPath && !uri.replace('buncument://', '').startsWith(searchPath)) continue;
+    if (searchPath && !uri.replace('buncument://', '').startsWith(searchPath))
+      continue;
     try {
       const content = await Bun.file(resource.filePath).text();
       const matches = content.match(regex);
@@ -574,7 +657,12 @@ async function grepDocuments(pattern: string, searchPath: string = '', limit: nu
         const start = Math.max(0, matchIndex - 50);
         const end = Math.min(content.length, matchIndex + 100);
         const snippet = content.slice(start, end).replace(/\n+/g, ' ').trim();
-        results.push({ uri, title: resource.name, score: matches.length, snippet: `...${snippet}...` });
+        results.push({
+          uri,
+          title: resource.name,
+          score: matches.length,
+          snippet: `...${snippet}...`,
+        });
       }
     } catch {
       // Ignore read errors
@@ -588,7 +676,7 @@ const server = new McpServer(
   { name: 'bun-mcp-server', version: VERSION },
   {
     capabilities: { tools: {}, resources: {} },
-    instructions: `This MCP server provides access to Bun documentation with optimized Worker-based search and caching.`
+    instructions: `This MCP server provides access to Bun documentation with FTS5 search and caching.`,
   }
 );
 
@@ -599,12 +687,12 @@ server.registerTool(
     inputSchema: {
       query: z.string(),
       path: z.string().optional(),
-      limit: z.number().optional()
-    }
+      limit: z.number().optional(),
+    },
   },
   async ({ query, path, limit }) => {
     try {
-      const results = await workerSearch(query, path, limit);
+      const results = ftsSearch(db, query, path, limit);
       return { content: [{ type: 'text', text: JSON.stringify(results) }] };
     } catch (e) {
       return { content: [{ type: 'text', text: String(e) }], isError: true };
@@ -620,8 +708,8 @@ server.registerTool(
       pattern: z.string(),
       path: z.string().optional(),
       limit: z.number().optional(),
-      flags: z.string().optional()
-    }
+      flags: z.string().optional(),
+    },
   },
   async ({ pattern, path, limit, flags }) => {
     try {
@@ -640,17 +728,28 @@ server.registerTool(
     inputSchema: {
       path: z.string(),
       maxLines: z.number().optional(),
-      offset: z.number().optional()
-    }
+      offset: z.number().optional(),
+    },
   },
   async ({ path, maxLines = 200, offset = 0 }) => {
     try {
       const slug = path.replace(/^\/+/, '').replace(/\.md$/, '');
       const resource = RESOURCE_INDEX.get(`buncument://${slug}`);
       if (!resource?.filePath) throw new Error('Not found');
-      const content = stripFrontmatter(await Bun.file(resource.filePath).text());
+      const content = stripFrontmatter(
+        await Bun.file(resource.filePath).text()
+      );
       const lines = content.split('\n');
-      return { content: [{ type: 'text', text: lines.slice(offset, offset + (maxLines || lines.length)).join('\n') }] };
+      return {
+        content: [
+          {
+            type: 'text',
+            text: lines
+              .slice(offset, offset + (maxLines || lines.length))
+              .join('\n'),
+          },
+        ],
+      };
     } catch (e) {
       return { content: [{ type: 'text', text: String(e) }], isError: true };
     }
@@ -661,11 +760,17 @@ server.registerTool(
   'list_bun_docs',
   {
     description: 'List docs.',
-    inputSchema: { category: z.string().optional(), limit: z.number().optional() }
+    inputSchema: {
+      category: z.string().optional(),
+      limit: z.number().optional(),
+    },
   },
   ({ category, limit = 50 }) => {
     const results = Array.from(RESOURCE_INDEX.entries())
-      .filter(([uri]) => !category || uri.replace('buncument://', '').startsWith(category))
+      .filter(
+        ([uri]) =>
+          !category || uri.replace('buncument://', '').startsWith(category)
+      )
       .slice(0, limit)
       .map(([uri, r]) => ({ uri, title: r.name, description: r.description }));
     return { content: [{ type: 'text', text: JSON.stringify(results) }] };
