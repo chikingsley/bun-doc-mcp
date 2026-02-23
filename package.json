@@ -1,6 +1,6 @@
 {
   "name": "bun-mcp-server",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "MCP server for Bun documentation",
   "module": "index.ts",
   "main": "dist/index.js",
@@ -19,6 +19,10 @@
   ],
   "author": "chikingsley",
   "license": "MIT",
+  "publishConfig": {
+    "provenance": true,
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/chikingsley/bun-mcp-server.git"
